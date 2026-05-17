@@ -1,0 +1,11 @@
+*.o
+*.out
+*.exe
+*.elf
+*.bin
+hello
+fd_test
+file_write
+file_read
+file_copy
+filewrite
