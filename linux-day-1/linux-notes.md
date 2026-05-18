@@ -3,43 +3,6 @@
 > 从 STM32 裸机到 Linux 系统编程
 
 ---
-
-## 6. fd 分配规则 & open() 系统调用
-
-**内核分配 fd 的规则：给你当前没被占用的、最小的那个整数。**
-
-0/1/2 已被占用 → 第一次 `open()` 拿到 3，第二次拿到 4，以此类推。
-
-```c
-#include <fcntl.h>
-#include <unistd.h>
-
-int fd = open("test.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-```
-
-### open() 常用标志
-
-| 标志 | 含义 |
-|------|------|
-| O_RDONLY | 只读 |
-| O_WRONLY | 只写 |
-| O_RDWR | 读写 |
-| O_CREAT | 文件不存在就创建 |
-| O_TRUNC | 打开时清空文件内容 |
-| O_APPEND | 追加模式，写到文件末尾 |
-
-第三个参数 `0644`：八进制权限，6=用户可读写，4=同组可读，4=其他人可读。
-
-### close() — 用完要关
-
-```c
-close(fd);
-```
-
-类比 STM32 上用完外设关时钟。在 Linux 里不关的话进程结束时会自动回收，但养成手动关的习惯。
-
----
-
 ## 1. 第一个 Linux C 程序
 
 ```c
@@ -497,4 +460,78 @@ int main()
 - `snprintf` 比 `sprintf` 安全，不会溢出
 - GCC `-Wformat-truncation` 会在编译期推算缓冲区大小，不要忽略
 - 路径缓冲区开 `[1024]` 省心智负担
+
+---
+
+## 13. fork — 进程分裂
+
+**`fork()` 是 Linux 创建进程的唯一方式。调用一次，返回两次，把当前进程完整复制一份，父子进程从同一行代码继续往下跑。**
+
+```c
+#include <unistd.h>
+pid_t pid = fork();
+```
+
+| 返回值 | 含义 |
+|--------|------|
+| > 0 | 在父进程，返回值 = 子进程 PID |
+| == 0 | 在子进程 |
+| < 0 | fork 失败 |
+
+### 核心认知：if-else 不是判断了两次
+
+fork 之后有两个执行者（父进程和子进程），**每个进程只看一个返回值，只走一条分支**。
+
+```
+fork() 返回 ─┬─ 父进程: pid = 子进程PID (6384) → 走 else if (pid > 0) 分支
+             │
+             └─ 子进程: pid = 0                → 走 if (pid == 0) 分支
+```
+
+fork 调用之前的代码只跑一次，fork 调用之后的所有代码在两个进程里各跑一遍。代码相同，执行流分叉。
+
+### 调度顺序不确定
+
+父子进程谁先被 CPU 执行，由内核调度器决定，**不保证顺序**。写代码时不能假设父先跑还是子先跑。
+
+### shell 只等父进程
+
+shell 只 wait 自己的直接子进程（父进程），不管"孙子"（子进程产生的子进程）。父进程退出时如果没有 wait 子进程：
+- 子进程变**孤儿**，被 PID 1 (init) 收养
+- shell 收回控制权，打印提示符
+- 孤儿继续跑完，输出可能掉在 shell 提示符后面
+
+这就是为什么会在终端看到 `$ [Child] my PID = xxx` 这种混乱输出。
+
+### 最小示例
+
+```c
+#include <stdio.h>
+#include <unistd.h>
+
+int main()
+{
+    printf("Before fork, PID = %d\n", getpid());
+
+    pid_t pid = fork();
+
+    if (pid == 0)
+        printf("[Child]  my PID = %d\n", getpid());
+    else if (pid > 0)
+        printf("[Parent] child PID = %d, my PID = %d\n", pid, getpid());
+    else
+        perror("fork failed");
+
+    return 0;
+}
+```
+
+### 与 FreeRTOS 对比
+
+FreeRTOS 的 `xTaskCreate()` 创建的任务共享同一个地址空间，fork 创建的是独立地址空间的进程。fork 之后各进程有自己的内存拷贝（COW 优化）。
+
+### 嵌入式中的用途
+
+守护进程（daemon）的创建、shell 执行命令（fork + exec）、后台服务。以后写驱动时，传感器采集守护进程、日志写入进程都是 fork 出来的。
+
 
