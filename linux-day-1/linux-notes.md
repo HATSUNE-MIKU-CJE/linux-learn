@@ -375,3 +375,126 @@ int main()
     return 0;
 }
 ```
+
+---
+
+## 11. 目录操作 — opendir / readdir / closedir
+
+**`opendir()` 打开目录拿到"目录流"句柄，`readdir()` 逐个读出目录里的文件名，`closedir()` 关掉。目录本质也是一个文件，里面存的是"文件名 → inode 号"的映射表。**
+
+```c
+#include <dirent.h>
+
+DIR *d = opendir(".");
+if (d == NULL) {
+    perror("opendir");
+    return 1;
+}
+
+struct dirent *e;
+while ((e = readdir(d)) != NULL) {
+    printf("%s\n", e->d_name);
+}
+closedir(d);
+```
+
+### struct dirent
+
+```c
+struct dirent {
+    ino_t  d_ino;        // inode 号
+    char   d_name[256];  // 文件名
+};
+```
+
+### . 和 ..
+
+每个目录都有内核自动生成的两个特殊条目：
+
+| 名字 | 指向 | 含义 |
+|------|------|------|
+| `.` | 当前目录自身 | "我自己" |
+| `..` | 父目录 | "上一层" |
+
+过滤：`if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;`
+
+### readdir 顺序
+
+**不保证任何顺序。** 返回的是磁盘上条目存储的物理顺序，不同文件系统、目录增删后都可能不同。要排序自己 `qsort()`。
+
+---
+
+## 12. readdir + stat 组合 — 迷你 ls -l
+
+**用 `snprintf` 拼出完整路径，再对每个文件调 `stat()`，拿到大小、权限、时间。**
+
+### 权限转 rwx 格式 — 查表法
+
+```c
+const char *rwx[] = {"---","--x","-w-","-wx","r--","r-x","rw-","rwx"};
+
+// 提取三位八进制位，直接当数组下标
+printf("%s%s%s", rwx[(perm >> 6) & 7],
+                 rwx[(perm >> 3) & 7],
+                 rwx[(perm >> 0) & 7]);
+```
+
+查表法 = 数据驱动。比 switch-case 短，O(1) 无条件分支。
+
+### 修改时间
+
+```c
+#include <time.h>
+char *t = ctime(&st.st_mtime);  // "Sat May 18 21:30:00 2026\n"
+t[24] = '\0';                    // 砍掉换行
+```
+
+### 完整示例
+
+```c
+#include <stdio.h>
+#include <dirent.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+
+int main()
+{
+    DIR *d = opendir(".");
+    if (d == NULL) { perror("opendir"); return 1; }
+
+    const char *rwx[] = {"---","--x","-w-","-wx","r--","r-x","rw-","rwx"};
+    struct dirent *e;
+    struct stat st;
+    char path[1024];
+
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+
+        snprintf(path, sizeof(path), "./%s", e->d_name);
+        if (stat(path, &st) == -1) { perror("stat"); continue; }
+
+        unsigned perm = st.st_mode & 0777;
+        char *t = ctime(&st.st_mtime);
+        t[24] = '\0';
+
+        printf("%s%s%s %-20s %8ld bytes %s %.16s\n",
+               rwx[(perm >> 6) & 7],
+               rwx[(perm >> 3) & 7],
+               rwx[perm & 7],
+               e->d_name, st.st_size,
+               S_ISDIR(st.st_mode) ? "DIR" : "FILE", t);
+    }
+    closedir(d);
+    return 0;
+}
+```
+
+### 注意
+
+- `readdir()` 返回裸文件名，调 `stat()` 时必须拼完整路径
+- `snprintf` 比 `sprintf` 安全，不会溢出
+- GCC `-Wformat-truncation` 会在编译期推算缓冲区大小，不要忽略
+- 路径缓冲区开 `[1024]` 省心智负担
+
