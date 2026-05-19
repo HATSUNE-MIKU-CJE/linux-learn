@@ -15,7 +15,6 @@ int main()
     else if (pid >0)
     {
         //父进程
-        usleep(100000);
         printf("[Parent]  child PID = %d, my PID = %d\n",pid,getpid());
     }
     else

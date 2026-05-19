@@ -9,3 +9,10 @@ file_write
 file_read
 file_copy
 filewrite
+lseek_demo
+stat_demo
+fork_demo
+open_dir
+zombie
+orphan
+.vscode/

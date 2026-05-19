@@ -27,7 +27,7 @@ int main()
     char path[772];
     unsigned num;
     char *ch[]={"---","---","---"};
-    char *rwx[]={"---","--x","-w-","-wx","r--","r-x","rw-","rwx"};
+    const char *rwx[]={"---","--x","-w-","-wx","r--","r-x","rw-","rwx"};
     char *t;
     
     while ((e=readdir(d))!=NULL)
@@ -47,7 +47,6 @@ int main()
         {
             ch[i]=rwx[(num>>3*(2-i))&7];
         }
-        ch[3]='\0';
         printf("%s%s%s   %-20s %8ld bytes %s  %.16s\n",
                ch[0],
                ch[1],
