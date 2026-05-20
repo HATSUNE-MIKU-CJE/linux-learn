@@ -15,4 +15,6 @@ fork_demo
 open_dir
 zombie
 orphan
+exec_demo
+execve
 .vscode/

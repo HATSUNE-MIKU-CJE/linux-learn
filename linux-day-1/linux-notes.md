@@ -693,4 +693,110 @@ for i in {1..10}; do ./orphan; echo "---"; done
 | 孤儿 | 不存在（所有任务同属一个程序） | 爹死子被 init 收养 |
 | 调试 | 逻辑分析仪 / J-Link 单步 | strace 抓系统调用 |
 
+---
 
+## 20. exec 家族 — 进程变身
+
+**`fork` 是复制自己，`exec` 是变成别人。fork+exec 是 Linux 创建新进程的万能公式。**
+
+STM32 类比：bootloader 跳转到 APP —— 芯片还是同一颗，但跑的代码完全换了。exec 同样：PID/PPID/fd 表不变，代码/数据/栈被新程序替换。
+
+### 家族一览
+
+| 函数 | 程序来源 | 参数传递 | 环境变量 |
+|------|---------|---------|---------|
+| execl | 路径 | 逐个写 | 继承 |
+| execlp | 文件名（PATH 搜索） | 逐个写 | 继承 |
+| execvp | 文件名（PATH 搜索） | 数组 | 继承 |
+| execve | 路径 | 数组 | 手动指定 |
+
+**记法**：`l`=list（一个个写），`v`=vector（数组传），`p`=PATH 搜索，`e`=environment。
+
+### 参数含义
+
+```c
+execlp("ls", "ls", "-l", NULL);
+//      ①    ②    ③    ④
+```
+
+| 位置 | 值 | 含义 |
+|------|-----|------|
+| ① file | `"ls"` | 在 PATH 里搜索的可执行文件名 |
+| ② argv[0] | `"ls"` | 传给新程序的程序名 |
+| ③ argv[1] | `"-l"` | 传给新程序的第一个参数 |
+| ④ 结尾 | `NULL` | 必须用 NULL 标记参数结束 |
+
+**①和②含义不同**：①是文件系统路径，②是新程序眼里的 `argv[0]`。通常写一样即可。
+
+### 核心认知
+
+- **exec 成功绝不返回**：成功时当前进程的代码已被替换，`perror("exec failed")` 只在失败时才执行
+- **fd 表保留**：exec 后之前打开的 fd 还在（这是 pipe+dup2+exec 的基础）
+- **PID/PPID/父子关系不变**：进程是容器，程序是内容。exec 换内容不换容器
+
+### execve — 底层系统调用
+
+所有 exec 函数最终都调用 `execve`：
+
+```c
+extern char **environ;
+char *args[] = {"/bin/ls", "-l", NULL};
+execve("/bin/ls", args, environ);
+```
+
+---
+
+## 21. waitpid — 非阻塞收尸
+
+**`wait()` = 等任意子进程，死等。`waitpid()` = 可指定 PID、可非阻塞轮询。**
+
+```c
+pid_t waitpid(pid_t pid, int *status, int options);
+```
+
+| 参数 | 含义 |
+|------|------|
+| pid | 等哪个子进程（-1 = 等任意） |
+| status | 退出状态 |
+| options | `WNOHANG` = 非阻塞，0 = 阻塞 |
+
+### WNOHANG 模式
+
+```c
+result = waitpid(-1, &status, WNOHANG);
+// result > 0  → 收到子进程，返回其 PID
+// result == 0 → 子进程都还活着，没收到
+// result < 0  → 出错
+```
+
+STM32 类比：查中断标志位 —— `if (TIM1->SR & TIM_SR_UIF)`，有就处理，没有继续干活。
+
+### 轮询+计数模式（守护进程标配）
+
+```c
+int reaped = 0;
+while (reaped < 3) {
+    result = waitpid(-1, &status, WNOHANG);
+    if (result > 0) {
+        printf("Child PID=%d done\n", result);
+        reaped++;
+    } else {
+        // 没死，干自己的活
+        sleep(1);
+    }
+}
+```
+
+---
+
+## 22. Day4 总结
+
+| 概念 | 核心 |
+|------|------|
+| exec 家族 | 进程变身另一个程序，PID 不变 |
+| execl vs execv | l=参数逐个写，v=数组传 |
+| execlp vs execve | p=PATH 搜索，不带 p 给完整路径 |
+| execve | 底层系统调用，所有 exec 的终点 |
+| fork+exec | shell 执行命令的万能公式 |
+| waitpid | 可指定 PID、可非阻塞（WNOHANG） |
+| 轮询+计数 | 守护进程管理子进程的标准模式 |
