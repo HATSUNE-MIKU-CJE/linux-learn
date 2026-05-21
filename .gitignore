@@ -1,20 +1,13 @@
+# 编译产物
 *.o
+*.ko
+*.mod.*
 *.out
-*.exe
-*.elf
-*.bin
-hello
-fd_test
-file_write
-file_read
-file_copy
-filewrite
-lseek_demo
-stat_demo
-fork_demo
-open_dir
-zombie
-orphan
-exec_demo
-execve
-.vscode/
+
+# 已移除的二进制文件
+linux-day-2/open_dir
+linux-day-5/pipe_demo
+linux-day-5/dup2_demo
+linux-day-5/sigchild_demo
+linux-day-5/signal_demo
+linux-day-5/sigchild
