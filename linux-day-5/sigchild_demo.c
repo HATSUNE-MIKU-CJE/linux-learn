@@ -3,7 +3,6 @@
 #include <sys/wait.h>
 #include <signal.h>
 
-#define _POSIX_C_SOURCE 199309L
 
 int alive = 3;
 
