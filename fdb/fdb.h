@@ -10,6 +10,7 @@
 #define FDB_RECORD_SIZE 256
 #define FDB_MAX_KEY_LEN 62
 #define FDB_MAX_VAL_LEN 190
+#define FDB_HEADER_SIZE 20
 
 /* ========== 磁盘结构（packed 防止对齐填充） ========== */
 typedef struct {
