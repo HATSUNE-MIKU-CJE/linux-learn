@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "index.h"
 
 /* ========== 常量 ========== */
 #define FDB_MAGIC       0x46444230   /* "FDB0" */
@@ -11,6 +12,9 @@
 #define FDB_MAX_KEY_LEN 62
 #define FDB_MAX_VAL_LEN 190
 #define FDB_HEADER_SIZE 20
+#define FDB_DEFAULT_RECORD_COUNT 256
+#define FDB_DEFAULT_INDEX_SIZE   101
+
 
 /* ========== 磁盘结构（packed 防止对齐填充） ========== */
 typedef struct {
@@ -29,14 +33,23 @@ typedef struct {
     int32_t  free_list_head;  /* -1 表示无空闲槽位 */
 } fdb_header_t;
 
-/* ========== 对外 API ========== */
-int   fdb_open(const char *path);
-void  fdb_close(int db);
+typedef struct 
+{
+    int fd;
+    fdb_header_t hdr;
+    index_t *idx;
+    char path[256];
+}fdb_t;
 
-int   fdb_get(int db, const char *key, char *value, size_t len);
-int   fdb_set(int db, const char *key, const char *value);
-int   fdb_delete(int db, const char *key);
-int   fdb_list(int db);
-int   fdb_compact(int db);
+
+/* ========== 对外 API ========== */
+fdb_t *fdb_open(const char *path);
+void  fdb_close(fdb_t *db);
+
+int fdb_get(fdb_t *db, const char *key, char *value, size_t len);
+int fdb_set(fdb_t *db, const char *key, const char *value);
+int fdb_delete(fdb_t *db, const char *key);
+int fdb_list(fdb_t *db);
+int fdb_compact(fdb_t *db);
 
 #endif
