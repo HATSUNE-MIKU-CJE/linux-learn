@@ -4,6 +4,10 @@
 *.mod.*
 *.out
 
+# fdb 测试数据
+fdb/fdb
+*.db
+
 # 已移除的二进制文件
 linux-day-2/open_dir
 linux-day-5/pipe_demo
