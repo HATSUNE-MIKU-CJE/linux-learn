@@ -1442,15 +1442,11 @@ setup_pipe()  — 只负责 fd 管理
 
 ---
 
-## fdb — 微型键值存储引擎（项目架构分析）
+## 项目架构分析方法
 
-### 一句话
+### 两种方法，两种场景
 
-用定长记录 + lseek 跳转实现 O(1) 读写，用 rename 保证写入不丢数据。本质是把 EEPROM 的套路搬到 Linux 文件系统上。
-
-### 架构分析三步法
-
-面对一个新项目，按这个顺序拆：
+**方法A：数据驱动法（旧三步走）**
 
 ```
 第一步：找数据 → 这个程序操作的核心数据是什么？
@@ -1458,125 +1454,164 @@ setup_pipe()  — 只负责 fd 管理
 第三步：定模块 → 把数据和操作按职责分组
 ```
 
-**套路不变，换项目照样拆。**
+适用于**数据结构复杂的项目**（fdb 的磁盘格式+索引+业务）。前提是你已经懂这个领域，知道数据长什么样。
 
-### 第一步：找数据
-
-fdb 只有两种数据：
-
-1. **磁盘上的数据文件（.fdb）**
-   - Header（magic/version/record_size/record_count/free_list_head）
-   - N 条定长 Record（flags/key/value）
-2. **内存中的索引（运行时）**
-   - key → 记录编号 的映射（链式哈希表）
-
-### 第二步：找操作
+**方法B：功能驱动法（新方法）**
 
 ```
-磁盘层：
-  - 打开/创建数据文件
-  - 读/写 Header
-  - 读/写第 N 条 Record
-  - 原子写入（tmp + fsync + rename）
+第一步：列功能 → 用户看到这个程序能做什么？（自然语言，不讲技术）
+第二步：映射技术栈 → 每个功能需要什么 syscall/技术？标记"已会"和"待学"
+第三步：按技术边界定模块 → 把"已会"和"待学"分到不同文件
+```
 
-索引层：
-  - 扫描全文件，建立 key→编号 映射
-  - 查找/插入/删除映射
+适用于**概念密度高的项目**（logd 的守护进程/FIFO/信号/轮转全是新概念）。不需要先懂领域，从功能列表出发。
 
-业务层：
-  - get(key) → value
-  - set(key, value)
-  - delete(key)
-  - list() → 所有有效 key
-  - compact() → 回收删除空间
+**什么时候用哪个？**
+
+| 判断标准 | 数据驱动法 | 功能驱动法 |
+|----------|:--:|:--:|
+| 新概念多吗 | 少 | 多 |
+| 数据模型复杂吗 | 复杂 | 简单 |
+| 典型项目 | fdb, shdb | mini-shell, logd, bfile |
+
+两种方法可以结合：先用功能驱动法列出技术缺口，再用数据驱动法分析数据流。最后都落到模块划分上。
+
+---
+
+## logd — 日志守护进程（项目架构分析）
+
+### 一句话
+
+后台守护进程，通过命名管道（FIFO）收集日志消息，加时间戳写入文件，超容量自动轮转。
+
+### 第一步：列功能（功能驱动法）
+
+用户视角，自然语言描述：
+
+```
+1. 启动后变成后台程序，脱离终端
+2. 创建一个可以从外部写消息的通道
+3. 收到消息后自动处理
+4. 每条消息加上时间戳
+5. 写进日志文件，文件超过阈值自动切走
+6. 外部能通过命令遥控它退出或手动轮转
+```
+
+### 第二步：功能 → 技术栈映射
+
+| 功能 | 需要什么 | 已会? |
+|------|---------|:--:|
+| 变成后台程序 | fork + setsid + chdir + fd 清理 | fork 会, 其余 ✗ |
+| 创建通道，无关进程通信 | mkfifo / FIFO | ✗ pipe 会, FIFO 新 |
+| 收到消息 | open + read + 主循环 | ✓ |
+| 加时间戳 | time + localtime + strftime | ✗ |
+| 写文件 | write + O_APPEND | ✓ |
+| 文件超容量切走 | lseek 查大小 + rename 链 | ✗ 轮转逻辑新 |
+| 遥控退出/轮转 | sigaction + SIGTERM + SIGHUP | ✓ 信号会, 用法新 |
+
+### 数据流分析（数据驱动法补充）
+
+```
+配置数据: fifo路径 / 日志路径 / 大小上限（命令行参数）
+    │
+传输数据: FIFO 字节流（客户端 → logd）
+    │
+格式化数据: [时间戳] + 原始消息（line[4096]）
+    │
+持久化数据: 日志文件 + .1 / .2 / .3 ...（磁盘）
+    │
+状态数据: fifo_fd / log_t(fd+path+current_size+max_size) / running / need_rotate
 ```
 
 ### 第三步：定模块
 
-四层结构，每层只做一件事：
-
 ```
-CLI (main.c)      ← 解析命令行，调业务层
-   ↓
-业务 (fdb.c)      ← get/set/delete/list/compact 逻辑
-   ↓           ↓
-磁盘 (record.c)   索引 (index.c)
-```
+main.c — 进程生命周期
+  ├── 参数解析（argv[1]=fifo, argv[2]=log, argv[3]=max）
+  ├── mkfifo 创建 FIFO 节点
+  ├── 守护进程化（fork×2 + setsid + chdir + fd清理）
+  ├── log_open 打开日志文件
+  ├── 信号注册（SIGTERM→退出, SIGHUP→轮转）
+  ├── open FIFO 读端 + 主循环（read → log_write）
+  └── 退出清理（unlink FIFO + log_close）
 
-### 文件清单与职责
-
-```
-fdb/
-├── Makefile
-├── fdb.h          ← 公共：常量、Record结构体、Header结构体、API声明
-├── fdb.c          ← 核心：open/close/get/set/delete/list/compact
-├── record.h       ← record.c 的内部头文件
-├── record.c       ← 磁盘层：Header读/写、Record读/写、原子写入(tmp+fsync+rename)
-├── index.h        ← index.c 的内部头文件
-├── index.c        ← 索引层：链式哈希表增删查 + 启动时扫描建索引
-└── main.c         ← CLI入口：arg解析 + 调 fdb.c
+log.c — 日志文件操作
+  ├── log_open: open + malloc 结构体 + lseek 取当前大小
+  ├── log_write: 格式化时间戳 → 检查容量 → (超了)轮转 → write
+  ├── log_close: close + free
+  └── 轮转: close → rename 链(app.log→.1→.2→...→.5) → open 新文件
 ```
 
-### 模块关系
+### 新概念速查
+
+| 概念 | 一句话 | 对应代码 |
+|------|--------|---------|
+| 守护进程化 | 脱离终端变后台服务的标准六步 | fork+setsid+chdir+close fds |
+| FIFO | 有名字的 pipe，任意进程通过文件路径通信 | mkfifo + open O_RDONLY |
+| 日志轮转 | 旧文件改名，新建空文件继续写 | rename 链 + open 新文件 |
+| sig_atomic_t | 信号打断也不会读歪的整型 | `volatile sig_atomic_t running` |
+| strftime | 格式化时间戳 | `strftime(buf, 80, "%Y-%m-%d %H:%M:%S", tm)` |
+| O_APPEND | 每次写都追加到文件末尾 | open 标志 |
+
+### 关键设计决策
+
+**日志轮转顺序必须从大到小**
+```
+先 rename(app.log.4 → app.log.5)   // 先把最旧的挪走
+再 rename(app.log.3 → app.log.4)   // 依次往下
+...
+最后 rename(app.log → app.log.1)   // 当前文件改名
+再 open 新 app.log
+```
+如果从小到大：rename(app.log→.1) 会覆盖已有的 .1，数据丢失。
+
+**信号 handler 只改标记，不动数据**
+handler 里绝不调 log_write/close/free——信号随时到，可能打断正在写文件的操作。只设 `running=0` 或 `need_rotate=1`，主循环安全处理。
+
+---
+
+## mini-shell / fdb / bfile 简要分析
+
+### mini-shell
+
+| 步骤 | 内容 |
+|------|------|
+| 功能 | 读取命令 → 解析管道/重定向 → 执行 → 等子进程退出 |
+| 技术栈 | readline(自制) + strtok_r 解析 + pipe+dup2 管道 + fork+exec+waitpid |
+| 数据流 | stdin字符串 → 解析后命令表 → 管道fd+进程pid → stdout输出 |
+| 模块 | main(REPL+解析+执行器全塞一起, 600行单文件) |
+| 新概念 | fork+exec+pipe+dup2——全是新的，Phase 1 前 8 天打底 |
+
+### fdb
+
+| 步骤 | 内容 |
+|------|------|
+| 功能 | set/get/delete/list/compact 键值存储 |
+| 技术栈 | open+read+write+lseek(定长记录跳转) + rename(原子写入) + 链式哈希表 |
+| 数据流 | 磁盘 Header+Record → 内存哈希索引 → 业务层增删查 |
+| 模块 | main(CLI) → fdb(业务) → record(磁盘) + index(哈希) |
+| 新概念 | rename+fsync 原子写入, 空闲链表空间复用, 四层架构 |
+
+### bfile
+
+| 步骤 | 内容 |
+|------|------|
+| 功能 | 按格式描述解析二进制文件，打印偏移+类型+值 |
+| 技术栈 | open+read+lseek + 函数指针dispatch表 + 大小端转换 + strtok_r |
+| 数据流 | 二进制文件字节 → field_def_t结构体数组 → type_table函数指针分派 → 格式化输出 |
+| 模块 | main(CLI+输出) + parse(格式串解析) + read(大小端读取函数集) |
+| 新概念 | 函数指针dispatch表, 大小端, 字节对齐, 联合体(uint64_t切入) |
+
+---
+
+### Phase 1 项目难度曲线
 
 ```
-fdb_open:
-  open → read header → index_build(扫描所有record建哈希表)
-  
-fdb_set:
-  index_find → 存在则复用编号 / 不存在则取 free_list_head
-  → 构造 record → record_atomic_write → index_insert
-
-fdb_get:
-  index_find → record_read → 拷贝 value
-
-fdb_delete:
-  index_find → 标记 tombstone → record_write → index_remove → 加入空闲链
-
-fdb_compact:
-  建新文件 → 遍历所有有效 record 拷贝过去 → rename 替换旧文件
+mini-shell  ★★★★  概念全新，代码量最大（~800行）
+fdb         ★★★   数据结构复杂，模块多（~650行，4个.c）
+bfile       ★★★   函数指针+字节序，代码少但偏底层（~300行）
+logd        ★★★★  新概念密度高但每个都不难（~400行，2个.c）
+shdb        ★★★★★ 上述四项目融合，体量翻倍
 ```
 
-### 核心机制
-
-**定长记录 = O(1) 跳转**
-```c
-off_t offset = HEADER_SIZE + rec_no * RECORD_SIZE;
-lseek(fd, offset, SEEK_SET);  // 计算一下就能跳，不用扫描
-```
-
-**原子写入 = 崩溃安全**
-```
-1. 写新数据到 .fdb.tmp
-2. fsync(.fdb.tmp)          ← 强制落盘
-3. rename(.fdb.tmp, .fdb)   ← 原子替换（内核保证不会出现半成品）
-```
-
-**空闲链表 = 空间复用**
-```
-删除时不物理擦除 → 标记 tombstone → 该槽加入空闲链表
-下次写入时优先取空闲链表头结点，复用空间
-```
-
-### 与 mini-shell 架构对比
-
-```
-mini-shell:  main → parser → executor → builtin
-fdb:         main → fdb    → record   → index
-```
-
-都是 Unix 分层设计哲学：入口 → 调度 → 底层模块，每层只做一件事。
-
-### 涉及系统调用
-
-| 系统调用 | 用途 | 是否已学 |
-|----------|------|:--:|
-| open/read/write/close | 数据文件操作 | Day1 ✅ |
-| lseek | 精确定位记录位置 | Day1 ✅ |
-| stat | 获取文件大小 | Day2 ✅ |
-| mmap/munmap | 零拷贝映射 | 待学 |
-| fcntl/flock | 文件锁防并发写冲突 | 待学 |
-| rename | 原子替换文件 | 待学 |
-| fsync | 强制数据落盘 | 待学 |
-
-三个新调用都是一行调用，不需要单独开课，做项目时现学现用。
+趋势：代码量在降但概念密度在升。前期打基础（mini-shell 把 fork/exec/pipe/signal 全摸一遍），后期新 API 只是加一行。
