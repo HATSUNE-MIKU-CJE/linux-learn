@@ -102,6 +102,36 @@ fdb 是我们的核心业务层，在有了索引层操作 index 和数据层操
 > **术语：碎片整理 / Compaction、垃圾回收 / GC**
 > —— 这里的 compact 本质上和 LevelDB 的 Compaction 思想一致——多条数据反复增删后，磁盘上产生碎片（墓碑 + 空闲槽混在有效数据中间），compact 将有效数据搬到新文件，丢弃无效数据，恢复空间连续性。在数据库领域这也叫 **垃圾回收（Garbage Collection, GC）**，通常通过 **写时复制（Copy-on-Write）** 或 **日志合并（Log-Structured Merge）** 实现。fdb 的做法属于前者——拷贝有效记录到新文件，原子替换。
 
+**tombstone 的真正价值：O(1) 删除 + 空间复用**
+
+删除时只改 flag = TOMBSTONE 而不是物理擦除，看起来是"为了省原子写"，但更关键的原因是——fdb 的核心设计是定长记录 + lseek O(1) 跳转：
+
+```c
+offset = HEADER_SIZE + rec_no * RECORD_SIZE;  // 算出来就能跳
+```
+
+如果把第 3 条物理删除，后面 4、5、6... 全要往前挪一个位置，1000 条记录删第一条要挪 999 条——O(n)，违背了 lseek O(1) 的设计。tombstone 让删除变成 O(1)，空闲槽通过**空闲链表**复用：
+
+```
+删除: 改 flag → 加入空闲链表（O(1)）
+写入: 优先取空闲链表头结点（O(1)，不新增 record_count）
+```
+
+代价是碎片——compact 来收拾，临时文件 + rename 原子替换。
+
+**compact 的崩溃安全性**
+
+compact 过程中突然断电不会丢数据，因为"三根支柱"：
+
+1. **不碰源文件** — 写全程只操作 .fdb.tmp，源文件不受影响
+2. **fsync 先落盘再换** — rename 前保证 tmp 是完整数据
+3. **rename 原子替换** — 要么成功（新文件生效），要么没执行（旧文件还在）
+
+不存在"换到一半"的中间态。这就是**崩溃一致性（Crash Consistency）**。
+
+> **引申：为什么不把索引也存到磁盘上**
+> 索引每次启动从 records 文件重建（`index_build` 扫描全文件），而不是持久化到磁盘。这是为了**避免索引和数据的二重一致性问题**。如果索引也存盘，每次 write 要同时改 records 文件 + 索引文件，万一改了一个没改另一个 → 索引说 key="foo" 在 slot 3，但 slot 3 没这条数据。数据库里这叫**缓存一致性（Cache Coherence）**问题——多个数据源之间需要 WAL/journal/checkpoint 来同步，极其复杂。不存索引 = 单一数据源（Single Source of Truth），从根本上避开了这个问题。
+
 **fdb.c 踩坑记录：**
 - `fdb_t *db` 声明后没 malloc 直接 `db->fd = fd`——野指针，必崩。
 - `fdb_compact` 中 `close(fd); db->fd = fd;` 顺序反了——已关闭的 fd 赋给 db->fd，后续所有磁盘操作全失败。
